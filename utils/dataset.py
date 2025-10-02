@@ -144,7 +144,7 @@ class SyntheticDataset(Dataset):
         # Convert to PIL for augmentation if test mode is active
         if self.test:
             pil_image = Image.fromarray(image)
-            pil_image = add_random_elements(pil_image, num_elements=10)
+            pil_image = add_random_elements(pil_image, num_elements=0)
             image = np.array(pil_image)
 
         # Convert to tensor
@@ -170,7 +170,7 @@ class SyntheticDataset(Dataset):
         return image, target
 
 
-def add_random_elements(image, num_elements=0):
+def add_random_elements(image, num_elements=10):
     draw = ImageDraw.Draw(image)
     w, h = image.size
 
