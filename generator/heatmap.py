@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import random
-from typing import Union, Tuple, List
+# from typing import Union, Tuple, List
 from scipy.ndimage import gaussian_filter
 from scipy.stats import norm
 from scipy.stats import skewnorm

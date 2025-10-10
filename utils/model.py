@@ -2,6 +2,64 @@ import torch
 import torch.nn as nn
 
 
+class HeatmapDetector(nn.Module):
+    def __init__(self, image_size, stride=None, scales=None, iou_threshold=0.25):
+        super().__init__()
+        self.image_size = image_size
+        self.iou_threshold = iou_threshold
+
+        self.conv1 = ConvBlock(3,  16, dropout=0.02)
+        self.conv2 = ConvBlock(16, 32, dropout=0.05)
+        self.conv3 = ConvBlock(32, 64, dropout=0.10)
+        self.pool = nn.MaxPool2d(2, 2)
+
+        if stride:
+            self.stride = stride
+
+        else:
+            self.stride = self._infer_stride(torch.zeros(1, 3, *image_size))
+        
+        if scales.any():
+            self.scales = scales
+
+        else:
+            self.scales = [self.stride*4, self.stride*6, self.stride*8, self.stride*10]
+
+            
+        ag = AnchorGenerator(stride=self.stride, scales=self.scales)
+        num_anchors = len(ag.scales)
+        
+        self.register_buffer("anchors", ag.generate(image_size))
+        # num_anchors = self.anchors.size(0) // ((image_size[0] // self.stride) * (image_size[1] // self.stride))
+        self.detector = GridAnchorDetector(in_channels=64, num_anchors=num_anchors)
+
+    def _infer_stride(self, x):
+        with torch.no_grad():
+            x = self.conv1(x)
+            x = self.pool(x)
+            x = self.conv2(x)
+            x = self.pool(x)
+            x = self.conv3(x)
+            feature_map_size = x.shape[2:]  # (H, W)
+
+        stride_h = self.image_size[0] // feature_map_size[0]
+        stride_w = self.image_size[1] // feature_map_size[1]
+
+        assert stride_h == stride_w, "Non-square stride detected"
+        return stride_h
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.pool(x)
+        x = self.conv2(x)
+        x = self.pool(x)
+        x = self.conv3(x)
+        
+        offsets, logits = self.detector(x)
+        
+        return offsets, logits
+
+
 class GridAnchorDetector(nn.Module):
     def __init__(self, in_channels=64, num_anchors=3):
         super().__init__()
@@ -62,64 +120,6 @@ class AnchorGenerator():
                     idx += 1
 
         return anchors
-
-
-class HeatmapDetector(nn.Module):
-    def __init__(self, image_size, stride=None, scales=None, iou_threshold=0.25):
-        super().__init__()
-        self.image_size = image_size
-        self.iou_threshold = iou_threshold
-
-        self.conv1 = ConvBlock(3,  16, dropout=0.02)
-        self.conv2 = ConvBlock(16, 32, dropout=0.05)
-        self.conv3 = ConvBlock(32, 64, dropout=0.10)
-        self.pool = nn.MaxPool2d(2, 2)
-
-        if stride:
-            self.stride = stride
-
-        else:
-            self.stride = self._infer_stride(torch.zeros(1, 3, *image_size))
-        
-        if scales.any():
-            self.scales = scales
-
-        else:
-            self.scales = [self.stride*4, self.stride*6, self.stride*8, self.stride*10]
-
-            
-        ag = AnchorGenerator(stride=self.stride, scales=self.scales)
-        num_anchors = len(ag.scales)
-        
-        self.register_buffer("anchors", ag.generate(image_size))
-        # num_anchors = self.anchors.size(0) // ((image_size[0] // self.stride) * (image_size[1] // self.stride))
-        self.detector = GridAnchorDetector(in_channels=64, num_anchors=num_anchors)
-
-    def _infer_stride(self, x):
-        with torch.no_grad():
-            x = self.conv1(x)
-            x = self.pool(x)
-            x = self.conv2(x)
-            x = self.pool(x)
-            x = self.conv3(x)
-            feature_map_size = x.shape[2:]  # (H, W)
-
-        stride_h = self.image_size[0] // feature_map_size[0]
-        stride_w = self.image_size[1] // feature_map_size[1]
-
-        assert stride_h == stride_w, "Non-square stride detected"
-        return stride_h
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.pool(x)
-        x = self.conv2(x)
-        x = self.pool(x)
-        x = self.conv3(x)
-        
-        offsets, logits = self.detector(x)
-        
-        return offsets, logits
 
 
 
