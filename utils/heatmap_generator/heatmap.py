@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import random
+import torch
 # from typing import Union, Tuple, List
 from scipy.ndimage import gaussian_filter
 from scipy.stats import norm
@@ -70,10 +71,13 @@ def generate_skewed_blob(image_size, center, sigma_range, alpha=(-2.5,2.5), norm
     # zero-out wrapped stripes introduced by roll
     if shift_y > 0:
         canvas_shifted[:shift_y, :] = 0
+        
     elif shift_y < 0:
         canvas_shifted[shift_y:, :] = 0
+        
     if shift_x > 0:
         canvas_shifted[:, :shift_x] = 0
+        
     elif shift_x < 0:
         canvas_shifted[:, shift_x:] = 0
 
@@ -140,10 +144,11 @@ def generate_heatmap_and_boxes(image_size, num_blobs, sigma_range, offset_range,
         while cx + dx < 0 or cx + dx > h:
             dx = int(dist * np.cos(angle))
 
-        dy = 0#int(dist * np.sin(angle))
+        dy = 0 #int(dist * np.sin(angle))
         centers.append((cx + dx, cy + dy))
 
     heatmap = np.zeros((h, w), dtype=np.float32)
+
     boxes = []
     for x, y in centers:
         blob, sigma = generate_skewed_blob(image_size, (x, y), sigma_range)
@@ -167,7 +172,86 @@ def generate_heatmap_and_boxes(image_size, num_blobs, sigma_range, offset_range,
     return heatmap, boxes
 
 
-def generate_dataset(num_images, image_size, sigma_range, offset_range, output_dir):
+def compose_heatmap_on_background(background_tensor, heatmap, heatmap_mode="overlay", alpha=0.7):
+    def random_rotate_chw_90(tensor):
+        """
+        Rotate a CHW image tensor by a random k * 90 degrees clockwise.
+    
+        :param tensor: torch.Tensor shape (3, H, W).
+        :return: torch.Tensor shape (3, H, W) with same dtype and device as input.
+        """
+        if tensor.ndim != 3 or tensor.shape[0] != 3:
+            raise ValueError("tensor must have shape (3, H, W)")
+
+        k = random.choice([0,1,2,3])
+        # convert clockwise k to the counter-clockwise k used by torch.rot90
+        k_mod = k % 4
+        if k_mod == 0:
+            return tensor.clone()
+
+        # torch.rot90 rotates counter-clockwise; clockwise rotation by k is rot90(..., k=-k)
+        return torch.rot90(tensor, k=-k_mod, dims=(1, 2)).contiguous()
+        
+    """
+    Compose a heatmap onto a background tensor and return an image suitable for saving.
+
+    :param background_tensor: torch.Tensor with shape (3, 128, 128). Background image in CHW format. If dtype is float, values are expected in [0,1] or [0,255]; function normalizes automatically.
+    :param heatmap_np: numpy.ndarray with shape (128, 128, 3). Heatmap in HWC (RGB) order. Values can be float in [0,1] or uint8/int in [0,255].
+    :param heatmap_mode: str, either "overlay" or "replace". "overlay" blends heatmap over background using a per-pixel alpha derived from heatmap brightness. "replace" makes the heatmap the output.
+    :param alpha: float, global blending strength in [0,1] used when heatmap_mode is "overlay". The per-pixel alpha = alpha * luminance(heatmap).
+    :return: numpy.ndarray, shape (128, 128, 3), dtype uint8, RGB order, values in [0,255].
+    """
+    # Validate inputs
+    if not isinstance(background_tensor, torch.Tensor):
+        raise TypeError("background_tensor must be a torch.Tensor")
+        
+    if background_tensor.ndim != 3 or background_tensor.shape != (3, 128, 128):
+        raise ValueError("background_tensor must have shape (3, 128, 128)")
+        
+    if heatmap.shape != (128, 128, 3):
+        raise ValueError("heatmap must have shape (128, 128, 3)")
+
+    # Convert background to float tensor in [0,1]
+    bg = background_tensor.detach().cpu()
+    if not torch.is_floating_point(bg):
+        bg = bg.to(torch.float32)
+    
+    if bg.max() > 1.1:
+        bg /= 255.0
+    
+    bg = bg.clamp(0.0, 1.0)
+    bg = random_rotate_chw_90(bg)
+
+    # Convert heatmap numpy to float tensor in [0,1] with shape (3,H,W)
+    hm = torch.from_numpy(heatmap)
+    hm = hm.permute(2, 0, 1).contiguous().to(torch.float32)
+    if hm.max() > 1.1:
+        hm = hm / 255.0
+    
+    hm = hm.clamp(0.0, 1.0)
+
+    # Compose
+    if heatmap_mode == "replace":
+        out = hm
+    
+    elif heatmap_mode == "overlay":
+        r, g, b = hm[0:1], hm[1:2], hm[2:3]
+        luminance = 0.2989 * r + 0.5870 * g + 0.1140 * b  # shape (1,H,W)
+        alpha_map = (alpha * luminance).clamp(0.0, 1.0)   # shape (1,H,W)
+        alpha_map3 = alpha_map.expand_as(hm)
+        out = alpha_map3 * hm + (1.0 - alpha_map3) * bg
+        out = out.clamp(0.0, 1.0)
+    
+    else:
+        raise ValueError("heatmap_mode must be 'overlay' or 'replace'")
+
+    # Convert back to HWC uint8 RGB
+    out_np = (out * 255.0).round().to(torch.uint8).permute(1, 2, 0).cpu().numpy()
+    
+    return out_np
+
+
+def generate_dataset(num_images, image_size, max_blobs, box_sizes, sigma_range, offset_range, output_dir, background_tensors=None, background_alpha=0.7):
     """
     Create a dataset of synthetic **colored** heatmap images and box annotations.
 
@@ -184,27 +268,38 @@ def generate_dataset(num_images, image_size, sigma_range, offset_range, output_d
     os.makedirs(lbl_dir, exist_ok=True)
 
     for idx in range(num_images):
-        n_blobs = random.randint(1, MAX_BLOBS)
-        heatmap, boxes = generate_heatmap_and_boxes(image_size, n_blobs, sigma_range, offset_range, box_sizes=BOX_SIZES)
+        n_blobs = random.randint(1, max_blobs)
+        heatmap, boxes = generate_heatmap_and_boxes(image_size, n_blobs, sigma_range, offset_range, box_sizes)
 
         # ONE-BOX for all dist
         # boxes = np.array(boxes)
         # boxes = [tuple([boxes[:,0].min(), boxes[:,1].min(), boxes[:,2].max(), boxes[:,3].max(), boxes[:,4].min(), boxes[:,5].min(), boxes[:,6].max(), boxes[:,7].max()])]
         # END ONE-BOX for all dist
-        
+
         # 1) Convert to 8-bit grayscale
         gray = (heatmap * 255).astype(np.uint8)
 
         # 2) Apply JET colormap → BGR color image
         colored = cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+        colored_rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+        
+        out_rgb = colored_rgb
+        if isinstance(background_tensors, list):
+            out_rgb = compose_heatmap_on_background(background_tensors[idx % len(background_tensors)], colored_rgb, alpha=background_alpha)
 
+        out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+        
         # 3) Save the colored heatmap
         img_path = os.path.join(img_dir, f'img_{idx:05d}.jpg')
-        cv2.imwrite(img_path, colored)
+        cv2.imwrite(img_path, out_bgr)
 
         # 4) Save box coordinates
         lbl_path = os.path.join(lbl_dir, f'img_{idx:05d}.txt')
         with open(lbl_path, 'w') as f:
             for l_x_min, l_y_min, l_x_max, l_y_max, s_x_min, s_y_min, s_x_max, s_y_max in boxes:
                 f.write(f"{l_x_min} {l_y_min} {l_x_max} {l_y_max} {s_x_min} {s_y_min} {s_x_max} {s_y_max}\n")
+
+        # pct = int((idx+1) * 100 / num_images)
+        # if pct % 5 == 0 and pct > 0:
+        #     print(f"{pct}% done")
 

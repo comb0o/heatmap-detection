@@ -20,7 +20,7 @@ class CaptureWebsite():
         opts = Options()
         if headless:
             opts.add_argument("--headless")
-            opts.add_argument(f"--window-size=1920,1080")  # initial size
+            opts.add_argument("--window-size=1920,1080")
 
         self.driver = webdriver.Chrome(options=opts)
         self.driver.get(url)
@@ -58,13 +58,17 @@ class CaptureWebsite():
         plt.show()
 
     def run(self, num_images, show_images=False):
-        for _ in range(num_images):
+        for idx in range(num_images):
             tensor = self._crop()
             if show_images:
                 print(type(tensor))
                 self._show_tensor(tensor)
 
             self.tensors.append(tensor)
+
+            # pct = int((idx+1) * 100 / num_images)
+            # if pct % 5 == 0 and pct > 0:
+            #     print(f"{pct}% done")
         
         self.close()
 
