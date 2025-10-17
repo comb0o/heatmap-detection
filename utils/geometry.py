@@ -73,22 +73,58 @@ def encode_boxes_to_offsets(target_boxes, anchors):
 
     return offsets
 
-
-def decode_offsets_to_boxes(offsets, anchors):
-    anchors = anchors.to(offsets.device)
+# OLD VERSION.. DELETE AFTER TEST!
+# def decode_offsets_to_boxes(offsets, anchors):
+#     anchors = anchors.to(offsets.device)
     
-    anchor_centers = (anchors[..., :2] + anchors[..., 2:]) / 2
-    anchor_sizes = anchors[..., 2:] - anchors[..., :2]
+#     anchor_centers = (anchors[..., :2] + anchors[..., 2:]) / 2
+#     anchor_sizes = anchors[..., 2:] - anchors[..., :2]
+
+#     pred_centers = offsets[..., :2] * anchor_sizes + anchor_centers
+#     pred_sizes = torch.exp(offsets[..., 2:]) * anchor_sizes
+
+#     boxes = torch.cat([
+#         pred_centers - pred_sizes / 2,
+#         pred_centers + pred_sizes / 2
+#     ], dim=-1)
+    
+#     return boxes  # [B, N, 4]
+
+def decode_offsets_to_boxes(offsets, anchors, eps=1e-6):
+    anchors = anchors.to(offsets.device)
+
+    assert offsets.ndim in (2, 3), "offsets must have shape [N,4] or [B,N,4]"
+    assert anchors.ndim in (2, 3), "anchors must have shape [N,4] or [1,N,4]"
+    assert offsets.size(-1) == 4, "last dim of offsets must be 4"
+    assert anchors.size(-1) == 4, "last dim of anchors must be 4"
+
+    if offsets.ndim == 2:
+        offsets = offsets.unsqueeze(0)
+
+    B, N_offsets, _ = offsets.shape
+
+    if anchors.ndim == 2:
+        anchors = anchors.unsqueeze(0)
+
+    B_anchors, N_anchors, _ = anchors.shape
+    assert B_anchors in (1, B), "anchors batch dimension must be 1 or match offsets batch"
+    assert N_anchors == N_offsets, f"number of anchors ({N_anchors}) must equal number of offsets ({N_offsets})"
+
+    if anchors.shape[0] == 1 and B > 1:
+        anchors = anchors.expand(B, -1, -1)
+
+    anchor_centers = (anchors[..., :2] + anchors[..., 2:]) / 2.0
+    anchor_sizes = (anchors[..., 2:] - anchors[..., :2]).clamp(min=eps)
 
     pred_centers = offsets[..., :2] * anchor_sizes + anchor_centers
     pred_sizes = torch.exp(offsets[..., 2:]) * anchor_sizes
 
     boxes = torch.cat([
-        pred_centers - pred_sizes / 2,
-        pred_centers + pred_sizes / 2
+        pred_centers - pred_sizes / 2.0,
+        pred_centers + pred_sizes / 2.0
     ], dim=-1)
-    
-    return boxes  # [B, N, 4]
+
+    return boxes
 
 
 def resize_image_and_boxes(image, boxes, size):
